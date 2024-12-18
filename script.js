@@ -34,6 +34,72 @@ const maxDifficultyScore = 35;
 // Debug mode
 const debug = false;
 
+// Add these camera-related variables with other game state variables
+const cameraViews = {
+  default: {
+    position: new THREE.Vector3(0, 0, 20),
+    rotation: new THREE.Euler(0, 0, 0),
+    lookAt: new THREE.Vector3(0, 0, 0)
+  },
+  side: {
+    position: new THREE.Vector3(20, 0, 0),
+    rotation: new THREE.Euler(0, -Math.PI/2, 0),
+    lookAt: new THREE.Vector3(0, 0, 0)
+  },
+  top: {
+    position: new THREE.Vector3(0, 20, 0),
+    rotation: new THREE.Euler(-Math.PI/2, 0, 0),
+    lookAt: new THREE.Vector3(0, 0, 0)
+  },
+  chase: {
+    position: new THREE.Vector3(0, 5, 25),
+    rotation: new THREE.Euler(0, 0, 0),
+    lookAt: null // Will follow player
+  },
+  cinematic: {
+    position: new THREE.Vector3(15, 5, 15),
+    rotation: new THREE.Euler(-Math.PI/8, Math.PI/4, 0),
+    lookAt: new THREE.Vector3(0, 0, 0)
+  }
+};
+
+let currentView = 'default';
+let isTransitioningCamera = false;
+
+// Add this function to handle camera transitions
+function transitionCamera(newView) {
+  if (isTransitioningCamera || currentView === newView) return;
+  
+  isTransitioningCamera = true;
+  const startPosition = camera.position.clone();
+  const targetPosition = cameraViews[newView].position.clone();
+  const startRotation = camera.rotation.clone();
+  const targetRotation = cameraViews[newView].rotation.clone();
+  
+  let progress = 0;
+  
+  function animateTransition() {
+    progress += 0.02;
+    const t = THREE.MathUtils.smoothstep(progress, 0, 1);
+    
+    camera.position.lerpVectors(startPosition, targetPosition, t);
+    
+    // Interpolate rotation
+    camera.rotation.x = THREE.MathUtils.lerp(startRotation.x, targetRotation.x, t);
+    camera.rotation.y = THREE.MathUtils.lerp(startRotation.y, targetRotation.y, t);
+    camera.rotation.z = THREE.MathUtils.lerp(startRotation.z, targetRotation.z, t);
+    
+    if (progress < 1) {
+      requestAnimationFrame(animateTransition);
+    } else {
+      isTransitioningCamera = false;
+      currentView = newView;
+    }
+  }
+  
+  animateTransition();
+}
+
 // Handle window resize
 window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
@@ -239,6 +305,21 @@ function setupControls() {
         break;
       case ' ':
         player.shoot();
+        break;
+      case '1':
+        transitionCamera('default');
+        break;
+      case '2':
+        transitionCamera('side');
+        break;
+      case '3':
+        transitionCamera('top');
+        break;
+      case '4':
+        transitionCamera('chase');
+        break;
+      case '5':
+        transitionCamera('cinematic');
         break;
     }
   });
@@ -615,6 +696,22 @@ function animateDeathCamera() {
 function gameLoop() {
   if (gameOver && !deathAnimation) return;
 
+  // Update camera position for chase view
+  if (currentView === 'chase' && !deathAnimation) {
+    const targetPosition = player.mesh.position.clone();
+    targetPosition.z += 25; // Position camera behind player
+    targetPosition.y += 5;  // Slightly above player
+    
+    camera.position.lerp(targetPosition, 0.1);
+    camera.lookAt(player.mesh.position);
+  } else if (!deathAnimation && !isTransitioningCamera) {
+    // For other views, maintain lookAt point
+    const view = cameraViews[currentView];
+    if (view.lookAt) {
+      camera.lookAt(view.lookAt);
+    }
+  }
+
   // Update game objects at normal speed if not in death animation
   if (!deathAnimation) {
     // Update stars
@@ -683,6 +780,7 @@ function initGame() {
   createStars();
   setupControls();
   spawnObstacles();
+  addViewUI();
   gameLoop();
 }
 
@@ -750,5 +848,31 @@ function resetGame() {
   
   // Restart game
   initGame();
+}
+
+// Add UI to show current view
+function addViewUI() {
+  const viewLabel = document.createElement('div');
+  viewLabel.style.position = 'absolute';
+  viewLabel.style.top = '60px';
+  viewLabel.style.left = '20px';
+  viewLabel.style.color = 'white';
+  viewLabel.style.fontFamily = 'Arial';
+  viewLabel.style.fontSize = '16px';
+  viewLabel.id = 'viewLabel';
+  document.body.appendChild(viewLabel);
+
+  function updateViewLabel() {
+    viewLabel.textContent = `View: ${currentView} (Press 1-5 to change)`;
+  }
+
+  // Update label when view changes
+  const originalTransition = transitionCamera;
+  transitionCamera = function(newView) {
+    originalTransition(newView);
+    updateViewLabel();
+  };
+
+  updateViewLabel();
 }
 
