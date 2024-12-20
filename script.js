@@ -9,6 +9,9 @@ const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 document.body.appendChild(renderer.domElement);
 
+// Add fog to the scene (near the start, after scene creation)
+scene.fog = new THREE.Fog(0x000000, 20, 50);
+
 // Lighting
 const ambientLight = new THREE.AmbientLight(0x404040);
 scene.add(ambientLight);
@@ -40,6 +43,13 @@ const cameraViews = {
     position: new THREE.Vector3(0, 0, 20),
     rotation: new THREE.Euler(0, 0, 0),
     lookAt: new THREE.Vector3(0, 0, 0)
+  },
+  firstPerson: {
+    position: new THREE.Vector3(0, 0.5, 0),
+    rotation: new THREE.Euler(0, Math.PI, 0),
+    lookAt: null,
+    offset: new THREE.Vector3(0, 0.8, 0),
+    followPlayer: true
   },
   side: {
     position: new THREE.Vector3(20, 0, 0),
@@ -141,18 +151,21 @@ class Player3D {
 
     // Add cockpit (window)
     const cockpitGeometry = new THREE.SphereGeometry(0.5, 16, 16);
-    const cockpitMaterial = new THREE.MeshPhongMaterial({
+    this.cockpitMaterial = new THREE.MeshPhongMaterial({
       color: 0x88ccff,
       specular: 0xffffff,
-      shininess: 100
+      shininess: 100,
+      transparent: true,
+      opacity: 1
     });
-    const cockpit = new THREE.Mesh(cockpitGeometry, cockpitMaterial);
+    const cockpit = new THREE.Mesh(cockpitGeometry, this.cockpitMaterial);
     cockpit.position.set(0, 0.5, 0);
     this.mesh.add(cockpit);
+    this.cockpit = cockpit;
 
     // Initial position and rotation
-    this.mesh.position.set(0, 5, 0);
-    this.mesh.rotation.x = -Math.PI / 2; // Rotate to point forward (along negative Z)
+    this.mesh.position.set(0, 0, 10);
+    this.mesh.rotation.x = 0;
 
     // Add to scene
     scene.add(this.mesh);
@@ -225,6 +238,13 @@ class Player3D {
     
     this.mesh.rotation.z += (targetRotationZ - this.mesh.rotation.z) * 0.1;
     this.mesh.rotation.x += (targetRotationX - this.mesh.rotation.x) * 0.1;
+
+    // Update cockpit transparency in first-person view
+    if (currentView === 'firstPerson') {
+      this.cockpitMaterial.opacity = 0;
+    } else {
+      this.cockpitMaterial.opacity = 1;
+    }
   }
 
   shoot() {
@@ -321,6 +341,9 @@ function setupControls() {
       case '5':
         transitionCamera('cinematic');
         break;
+      case '6': // Add key for first-person view
+        transitionCamera('firstPerson');
+        break;
     }
   });
 
@@ -378,32 +401,76 @@ function createStars() {
 // Add this before the spawnObstacle function
 class Obstacle3D {
   constructor(x, y, z, size, speed, rotationSpeed) {
-    // Create asteroid geometry with irregular shape
-    const geometry = new THREE.IcosahedronGeometry(size, 1);
+    // Create more detailed base geometry
+    const geometry = new THREE.IcosahedronGeometry(size, 2); // Increased detail level
     
-    // Distort vertices for more asteroid-like appearance
+    // Create more varied surface
     const positions = geometry.attributes.position.array;
+    const noise = new SimplexNoise(); // Now using global SimplexNoise from CDN
+    
     for (let i = 0; i < positions.length; i += 3) {
-      positions[i] += (Math.random() - 0.5) * 0.2 * size;
-      positions[i + 1] += (Math.random() - 0.5) * 0.2 * size;
-      positions[i + 2] += (Math.random() - 0.5) * 0.2 * size;
+      const vertex = new THREE.Vector3(
+        positions[i],
+        positions[i + 1],
+        positions[i + 2]
+      );
+      
+      // Add noise-based displacement
+      const noiseValue = noise.noise3D(
+        vertex.x * 0.5,
+        vertex.y * 0.5,
+        vertex.z * 0.5
+      );
+      
+      vertex.multiplyScalar(1 + noiseValue * 0.3);
+      
+      positions[i] = vertex.x;
+      positions[i + 1] = vertex.y;
+      positions[i + 2] = vertex.z;
     }
-    geometry.computeVertexNormals(); // Recompute normals after distortion
+    
+    geometry.computeVertexNormals();
 
-    // Create asteroid material with rocky texture
+    // Create more realistic material
     const material = new THREE.MeshStandardMaterial({
       color: 0x808080,
       roughness: 0.9,
       metalness: 0.1,
-      flatShading: true
+      flatShading: true,
+      vertexColors: true // Enable vertex colors
     });
 
-    // Create the main mesh
+    // Add vertex colors for visual variety
+    const colors = [];
+    const color = new THREE.Color();
+    
+    for (let i = 0; i < positions.length; i += 3) {
+      // Vary the color slightly for each vertex
+      const shade = 0.5 + Math.random() * 0.3;
+      color.setRGB(shade, shade, shade);
+      colors.push(color.r, color.g, color.b);
+    }
+    
+    geometry.setAttribute(
+      'color',
+      new THREE.Float32BufferAttribute(colors, 3)
+    );
+
+    // Create main mesh
     this.mesh = new THREE.Mesh(geometry, material);
     this.mesh.position.set(x, y, z);
+    
+    // Add ambient occlusion to crevices
+    const aoMap = this.generateAOTexture(geometry);
+    material.aoMap = aoMap;
+    material.aoMapIntensity = 1.0;
+
+    // Add detail features
+    this.addSurfaceDetails(size);
+    
     scene.add(this.mesh);
 
-    // Create hitbox (slightly smaller than visible mesh)
+    // Create hitbox (unchanged)
     const hitboxGeometry = new THREE.SphereGeometry(size * 0.8);
     const hitboxMaterial = new THREE.MeshBasicMaterial({
       visible: debug,
@@ -414,9 +481,6 @@ class Obstacle3D {
     this.hitbox.position.copy(this.mesh.position);
     scene.add(this.hitbox);
 
-    // Add craters
-    this.addCraters(size);
-
     // Store properties
     this.size = size;
     this.speed = speed;
@@ -426,38 +490,311 @@ class Obstacle3D {
       Math.random() - 0.5,
       Math.random() - 0.5
     ).normalize();
-    this.direction = new THREE.Vector3(0, 0, 1); // Default direction, will be set by spawnObstacle
+
+    // Store original size for scaling calculations
+    this.originalSize = size;
+    this.baseScale = new THREE.Vector3(1, 1, 1);
+  }
+
+  addSurfaceDetails(size) {
+    this.addCraters(size);
+    this.addRocks(size);
+    this.addCracks(size);
+    this.addRidges(size);
+    this.addDust(size);
   }
 
   addCraters(size) {
-    const numCraters = Math.floor(Math.random() * 5) + 3;
+    const numCraters = Math.floor(Math.random() * 8) + 5;
     for (let i = 0; i < numCraters; i++) {
-      const craterSize = size * (Math.random() * 0.3 + 0.1);
-      const craterGeometry = new THREE.CircleGeometry(craterSize, 16);
+      const craterSize = size * (Math.random() * 0.4 + 0.1);
+      
+      // Create crater using a modified sphere geometry
+      const craterGeometry = new THREE.SphereGeometry(
+        craterSize,
+        16,
+        16,
+        0,
+        Math.PI * 2,
+        0,
+        Math.PI / 2
+      );
       const craterMaterial = new THREE.MeshStandardMaterial({
-        color: 0x505050,
-        roughness: 1,
-        metalness: 0,
+        color: 0x404040,
+        roughness: 0.9,
+        metalness: 0.1,
+        flatShading: true,
         side: THREE.DoubleSide
       });
+      
       const crater = new THREE.Mesh(craterGeometry, craterMaterial);
-
-      // Position crater on asteroid surface
-      crater.position.set(
-        (Math.random() - 0.5) * size,
-        (Math.random() - 0.5) * size,
-        (Math.random() - 0.5) * size
-      );
+      
+      // Position crater
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.acos(Math.random() * 2 - 1);
+      crater.position.setFromSpherical(new THREE.Spherical(size * 1.01, phi, theta));
       crater.lookAt(this.mesh.position);
-      crater.position.normalize().multiplyScalar(size * 1.01); // Slightly above surface
+      
+      // Add debris inside crater
+      for (let j = 0; j < 5; j++) {
+        const debris = this.createDebris(craterSize * 0.1);
+        debris.position.copy(crater.position);
+        debris.position.x += (Math.random() - 0.5) * craterSize * 0.8;
+        debris.position.y += (Math.random() - 0.5) * craterSize * 0.8;
+        debris.position.z += Math.random() * craterSize * 0.1;
+        debris.lookAt(this.mesh.position);
+        this.mesh.add(debris);
+      }
       
       this.mesh.add(crater);
     }
   }
 
+  addRocks(size) {
+    const numRocks = Math.floor(Math.random() * 15) + 10; // More rocks
+    for (let i = 0; i < numRocks; i++) {
+      const rockSize = size * (Math.random() * 0.15 + 0.05);
+      const rock = this.createRock(rockSize);
+      
+      // Better distribution of rocks
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.acos(Math.random() * 2 - 1);
+      rock.position.setFromSpherical(new THREE.Spherical(size * 1.02, phi, theta));
+      
+      rock.rotation.set(
+        Math.random() * Math.PI,
+        Math.random() * Math.PI,
+        Math.random() * Math.PI
+      );
+      
+      this.mesh.add(rock);
+    }
+  }
+
+  createRock(size) {
+    // Create more detailed rocks
+    const geometry = new THREE.DodecahedronGeometry(size, 1);
+    
+    // Distort vertices for more natural look
+    const positions = geometry.attributes.position.array;
+    for (let i = 0; i < positions.length; i += 3) {
+      positions[i] *= 0.8 + Math.random() * 0.4;
+      positions[i + 1] *= 0.8 + Math.random() * 0.4;
+      positions[i + 2] *= 0.8 + Math.random() * 0.4;
+    }
+    
+    geometry.computeVertexNormals();
+    
+    const material = new THREE.MeshStandardMaterial({
+      color: 0x606060,
+      roughness: 0.9,
+      metalness: 0.1,
+      flatShading: true
+    });
+    
+    return new THREE.Mesh(geometry, material);
+  }
+
+  createDebris(size) {
+    const geometry = new THREE.TetrahedronGeometry(size);
+    const material = new THREE.MeshStandardMaterial({
+      color: 0x505050,
+      roughness: 1,
+      metalness: 0,
+      flatShading: true
+    });
+    return new THREE.Mesh(geometry, material);
+  }
+
+  addCracks(size) {
+    const numCracks = Math.floor(Math.random() * 5) + 3;
+    for (let i = 0; i < numCracks; i++) {
+      const points = [];
+      const length = size * (Math.random() * 0.5 + 0.5);
+      const segments = 10;
+      
+      // Create jagged line for crack
+      for (let j = 0; j < segments; j++) {
+        const t = j / (segments - 1);
+        points.push(new THREE.Vector3(
+          (Math.random() - 0.5) * 0.2 * length,
+          t * length,
+          (Math.random() - 0.5) * 0.2 * length
+        ));
+      }
+      
+      const crackGeometry = new THREE.BufferGeometry().setFromPoints(points);
+      const crackMaterial = new THREE.LineBasicMaterial({ 
+        color: 0x202020,
+        linewidth: 2
+      });
+      
+      const crack = new THREE.Line(crackGeometry, crackMaterial);
+      
+      // Position crack
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.acos(Math.random() * 2 - 1);
+      crack.position.setFromSpherical(new THREE.Spherical(size * 1.01, phi, theta));
+      crack.lookAt(this.mesh.position);
+      
+      this.mesh.add(crack);
+    }
+  }
+
+  addRidges(size) {
+    const numMountains = Math.floor(Math.random() * 3) + 2;
+    for (let i = 0; i < numMountains; i++) {
+      // Create mountain using cone geometry
+      const height = size * (Math.random() * 0.4 + 0.2);
+      const radius = size * (Math.random() * 0.3 + 0.1);
+      const mountainGeometry = new THREE.ConeGeometry(
+        radius,
+        height,
+        8,
+        1,
+        true
+      );
+      
+      // Distort vertices for more natural look
+      const positions = mountainGeometry.attributes.position.array;
+      for (let j = 0; j < positions.length; j += 3) {
+        const distortion = (Math.random() - 0.5) * 0.2;
+        positions[j] *= 1 + distortion;
+        positions[j + 1] *= 1 + Math.abs(distortion);
+        positions[j + 2] *= 1 + distortion;
+      }
+      mountainGeometry.computeVertexNormals();
+      
+      const mountainMaterial = new THREE.MeshStandardMaterial({
+        color: 0x606060,
+        roughness: 0.9,
+        metalness: 0.1,
+        flatShading: true
+      });
+      
+      const mountain = new THREE.Mesh(mountainGeometry, mountainMaterial);
+      
+      // Position mountain
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.acos(Math.random() * 2 - 1);
+      mountain.position.setFromSpherical(new THREE.Spherical(size * 1.01, phi, theta));
+      mountain.lookAt(this.mesh.position);
+      
+      // Random rotation around normal
+      mountain.rotateOnAxis(
+        new THREE.Vector3().subVectors(mountain.position, this.mesh.position).normalize(),
+        Math.random() * Math.PI * 2
+      );
+      
+      // Add some rocks around the base
+      const numRocks = Math.floor(Math.random() * 5) + 3;
+      for (let j = 0; j < numRocks; j++) {
+        const rock = this.createRock(radius * 0.2);
+        rock.position.copy(mountain.position);
+        rock.position.x += (Math.random() - 0.5) * radius;
+        rock.position.y += (Math.random() - 0.5) * radius;
+        rock.position.z += Math.random() * radius * 0.1;
+        rock.lookAt(this.mesh.position);
+        this.mesh.add(rock);
+      }
+      
+      this.mesh.add(mountain);
+    }
+  }
+
+  addDust(size) {
+    // Add dust particle system
+    const particleCount = 50;
+    const particles = new THREE.BufferGeometry();
+    const positions = new Float32Array(particleCount * 3);
+    
+    for (let i = 0; i < particleCount * 3; i += 3) {
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.acos(Math.random() * 2 - 1);
+      const radius = size * (1 + Math.random() * 0.1);
+      
+      positions[i] = radius * Math.sin(phi) * Math.cos(theta);
+      positions[i + 1] = radius * Math.sin(phi) * Math.sin(theta);
+      positions[i + 2] = radius * Math.cos(phi);
+    }
+    
+    particles.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    
+    const dustMaterial = new THREE.PointsMaterial({
+      color: 0x808080,
+      size: size * 0.05,
+      transparent: true,
+      opacity: 0.5,
+      blending: THREE.AdditiveBlending
+    });
+    
+    const dustCloud = new THREE.Points(particles, dustMaterial);
+    this.mesh.add(dustCloud);
+  }
+
+  generateAOTexture(geometry) {
+    // Create a simple ambient occlusion texture
+    const textureSize = 512;
+    const canvas = document.createElement('canvas');
+    canvas.width = textureSize;
+    canvas.height = textureSize;
+    const ctx = canvas.getContext('2d');
+    
+    // Generate AO based on geometry normals
+    // This is a simplified version - could be more sophisticated
+    const positions = geometry.attributes.position.array;
+    const normals = geometry.attributes.normal.array;
+    
+    for (let i = 0; i < positions.length; i += 3) {
+      const normal = new THREE.Vector3(
+        normals[i],
+        normals[i + 1],
+        normals[i + 2]
+      );
+      
+      // Darker in crevices (where normal faces inward more)
+      const ao = Math.pow(0.5 + normal.y * 0.5, 0.5);
+      
+      ctx.fillStyle = `rgb(${ao * 255},${ao * 255},${ao * 255})`;
+      ctx.fillRect(
+        (i / 3) % textureSize,
+        Math.floor((i / 3) / textureSize),
+        1,
+        1
+      );
+    }
+    
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.needsUpdate = true;
+    return texture;
+  }
+
   update() {
-    // Move straight forward, maintaining X position
-    this.mesh.position.z += this.direction.z * this.speed;
+    if (currentView === 'firstPerson') {
+      // Move towards player in first-person view
+      this.mesh.position.z += this.direction.z * this.speed;
+    } else {
+      // Original movement for other views
+      this.mesh.position.z += this.direction.z * this.speed;
+    }
+    
+    // Calculate distance-based scaling
+    const distanceToCamera = this.mesh.position.distanceTo(camera.position);
+    const maxDistance = 50; // Distance where asteroid is smallest
+    const minDistance = 5;  // Distance where asteroid is largest
+    
+    // Calculate scale factor based on distance
+    const scale = THREE.MathUtils.lerp(
+      1.5,  // Max scale when closest
+      0.5,  // Min scale when farthest
+      THREE.MathUtils.smoothstep(distanceToCamera, minDistance, maxDistance)
+    );
+
+    // Apply scale to both mesh and hitbox
+    this.mesh.scale.copy(this.baseScale).multiplyScalar(scale);
+    this.hitbox.scale.copy(this.baseScale).multiplyScalar(scale * 0.8); // Keep hitbox slightly smaller
+    
+    // Update hitbox position
     this.hitbox.position.copy(this.mesh.position);
 
     // Rotate around random axis
@@ -523,18 +860,16 @@ function checkCollision(object1, object2) {
 function spawnObstacle(cappedScore) {
   const horizonDistance = 50;
   const spawnWidth = 40;
-  const spawnHeight = 20; // Height range for spawning
+  const spawnHeight = 20;
   
-  // Calculate spawn position
   const x = (Math.random() - 0.5) * spawnWidth;
   const y = (Math.random() - 0.5) * spawnHeight;
   const z = -horizonDistance;
   
-  const size = Math.random() * (3 - 1) + 1;
+  const size = Math.random() * (2 - 1) + 1;
   
-  // Direction is straight forward
+  // Direction is always toward player
   const direction = new THREE.Vector3(0, 0, 1).normalize();
-  
   const speed = (0.1 + cappedScore * 0.01) * 2;
   const rotationSpeed = (Math.random() * 0.02 - 0.01) * (1 + cappedScore / 50);
 
@@ -696,19 +1031,30 @@ function animateDeathCamera() {
 function gameLoop() {
   if (gameOver && !deathAnimation) return;
 
-  // Update camera position for chase view
-  if (currentView === 'chase' && !deathAnimation) {
-    const targetPosition = player.mesh.position.clone();
-    targetPosition.z += 25; // Position camera behind player
-    targetPosition.y += 5;  // Slightly above player
-    
-    camera.position.lerp(targetPosition, 0.1);
-    camera.lookAt(player.mesh.position);
-  } else if (!deathAnimation && !isTransitioningCamera) {
-    // For other views, maintain lookAt point
-    const view = cameraViews[currentView];
-    if (view.lookAt) {
-      camera.lookAt(view.lookAt);
+  // Update camera position for special views
+  if (!deathAnimation && !isTransitioningCamera) {
+    if (currentView === 'chase') {
+      const targetPosition = player.mesh.position.clone();
+      targetPosition.z += 25;
+      targetPosition.y += 5;
+      
+      camera.position.lerp(targetPosition, 0.1);
+      camera.lookAt(player.mesh.position);
+    } else if (currentView === 'firstPerson') {
+      // Update camera position to be slightly above player
+      camera.position.copy(player.mesh.position);
+      camera.position.y += 0.8; // Camera height
+      
+      // Look forward
+      camera.rotation.set(0, Math.PI, 0);
+      
+      // Add slight tilt based on player movement
+      camera.rotation.z = player.mesh.rotation.z * 0.5;
+    } else {
+      const view = cameraViews[currentView];
+      if (view.lookAt) {
+        camera.lookAt(view.lookAt);
+      }
     }
   }
 
@@ -863,7 +1209,7 @@ function addViewUI() {
   document.body.appendChild(viewLabel);
 
   function updateViewLabel() {
-    viewLabel.textContent = `View: ${currentView} (Press 1-5 to change)`;
+    viewLabel.textContent = `View: ${currentView} (Press 1-6 to change)`;
   }
 
   // Update label when view changes
@@ -874,5 +1220,63 @@ function addViewUI() {
   };
 
   updateViewLabel();
+}
+
+function createCoordinateGrid() {
+  // Create main grid with more visible colors
+  const gridSize = 200;
+  const divisions = 40; // More divisions for better detail
+  const mainColor = 0x444444; // Brighter main lines
+  const secondaryColor = 0x222222; // Brighter secondary lines
+  const gridHelper = new THREE.GridHelper(gridSize, divisions, mainColor, secondaryColor);
+  gridHelper.position.y = -5; // Move grid closer to action
+  
+  // Adjust grid transparency
+  gridHelper.material.transparent = true;
+  gridHelper.material.opacity = 0.3; // Increased opacity
+  
+  // Add distance-based fade
+  gridHelper.material.onBeforeCompile = (shader) => {
+    shader.fragmentShader = shader.fragmentShader.replace(
+      'gl_FragColor = vec4( color, diffuseColor.a );',
+      `
+      float dist = length(vViewPosition);
+      float fadeStart = 10.0; // Start fading closer
+      float fadeEnd = 80.0;  // Fade out further
+      float fade = 1.0 - smoothstep(fadeStart, fadeEnd, dist);
+      gl_FragColor = vec4( color, diffuseColor.a * fade * 0.3);
+      `
+    );
+  };
+
+  scene.add(gridHelper);
+
+  // Add more visible depth lines
+  const lineMaterial = new THREE.LineBasicMaterial({
+    color: mainColor,
+    transparent: true,
+    opacity: 0.25
+  });
+
+  // Create depth lines with smaller spacing
+  const depthLineGeometry = new THREE.BufferGeometry();
+  const depthLinePositions = [];
+  const spacing = gridSize / divisions;
+  
+  // Add more frequent depth lines
+  for (let i = -divisions/2; i <= divisions/2; i += 1) {
+    depthLinePositions.push(
+      i * spacing, -5, -gridSize/2, // Start higher
+      i * spacing, -5, gridSize/2
+    );
+  }
+
+  depthLineGeometry.setAttribute(
+    'position',
+    new THREE.Float32BufferAttribute(depthLinePositions, 3)
+  );
+  
+  const depthLines = new THREE.LineSegments(depthLineGeometry, lineMaterial);
+  scene.add(depthLines);
 }
 
